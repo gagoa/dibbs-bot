@@ -26,7 +26,7 @@ import streamlit as st  # noqa: E402
 
 from analysis.nsn_tools import PREFERRED_FSCS, RISKY_FSCS, classify_fsc  # noqa: E402
 from analysis.score_opportunities import score_all  # noqa: E402
-from db.database import count_rfqs, fetch_all_rfqs_with_scores  # noqa: E402
+from db.database import count_rfqs, fetch_all_rfqs_with_scores, init_db  # noqa: E402
 from scraper.fetch_rfqs import DibbsSession, fetch_recent_indexes  # noqa: E402
 from scraper.parse_rfqs import ingest_directory  # noqa: E402
 from utils.config import SETTINGS  # noqa: E402
@@ -126,6 +126,26 @@ def _scrape_state() -> dict[str, Any]:
         "started_at": None,
         "started_by_session": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# One-time DB bootstrap
+#
+# When the app boots on a fresh container (e.g. Streamlit Community Cloud
+# after a cold start, or any new clone of the repo), there's no SQLite file
+# yet and no `rfqs` table -- so the first count_rfqs() call would crash with
+# "no such table: rfqs". Running init_db() once on startup creates the
+# schema if it's missing. The SQL inside is all CREATE TABLE IF NOT EXISTS,
+# so it's a no-op when the DB already exists.
+#
+# cache_resource ensures this runs exactly once per Python process, not on
+# every script rerun.
+# ---------------------------------------------------------------------------
+
+@st.cache_resource
+def _ensure_db_initialized() -> bool:
+    init_db()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -473,9 +493,15 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    # Auth gate is the very first thing: if a password is configured and the
-    # user isn't signed in, require_login() renders a login form and stops
-    # the script before any data is loaded or any scrape can be triggered.
+    # Make sure the SQLite schema exists before anything else queries it.
+    # This is what protects us from "no such table: rfqs" on a fresh
+    # container (e.g. first boot on Streamlit Community Cloud).
+    _ensure_db_initialized()
+
+    # Auth gate is the very first thing after the DB is ready: if a password
+    # is configured and the user isn't signed in, require_login() renders a
+    # login form and stops the script before any data is loaded or any
+    # scrape can be triggered.
     require_login()
 
     st.title("dibbs-bot")
