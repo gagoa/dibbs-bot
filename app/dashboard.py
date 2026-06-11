@@ -334,12 +334,14 @@ def _days_until_close(d: Any) -> int | None:
 
 TABLE_COLUMNS = [
     "score",
+    "recommended_action",
     "solicitation_number",
     "nsn",
     "fsc",
     "item_name",
     "quantity",
     "unit_of_issue",
+    "estimated_capital_usd",
     "close_date",
     "set_aside",
     "approved_source_cages",
@@ -356,12 +358,14 @@ def render_table(df: pd.DataFrame, *, key: str | None = None) -> None:
     view = df[cols].rename(
         columns={
             "score": "Score",
+            "recommended_action": "Action",
             "solicitation_number": "Solicitation",
             "nsn": "NSN",
             "fsc": "FSC",
             "item_name": "Item",
             "quantity": "Qty",
             "unit_of_issue": "UoI",
+            "estimated_capital_usd": "Est. Capital",
             "close_date": "Closes",
             "set_aside": "Set-Aside",
             "approved_source_cages": "Approved CAGEs",
@@ -371,16 +375,66 @@ def render_table(df: pd.DataFrame, *, key: str | None = None) -> None:
     st.dataframe(view, hide_index=True, width="stretch", key=key)
 
 
+# Color hints for the recommended-action banner.
+_ACTION_COLORS: dict[str, str] = {
+    "BID IMMEDIATELY":            "#16a34a",  # green
+    "INVESTIGATE SUPPLIER FIRST": "#d97706",  # amber
+    "AVOID":                      "#dc2626",  # red
+}
+
+
+def _money(v: Any) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "—"
+    return f"~${int(v):,}"
+
+
+def _pct(v: Any) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "—"
+    return f"{int(round(float(v) * 100))}%"
+
+
+def _margin_range(row: dict[str, Any]) -> str:
+    lo = row.get("estimated_margin_low")
+    hi = row.get("estimated_margin_high")
+    if lo is None or hi is None:
+        return "—"
+    return f"{lo:g}% – {hi:g}%"
+
+
 def render_detail(row: dict[str, Any]) -> None:
     """Detail panel for a single RFQ row."""
     st.markdown(f"### {row.get('solicitation_number', '(no number)')}")
     st.caption(row.get("item_name") or "")
 
+    # Big colored recommended-action banner up top.
+    action = row.get("recommended_action")
+    if action:
+        color = _ACTION_COLORS.get(action, "#6b7280")
+        st.markdown(
+            f"<div style='background:{color};color:white;padding:0.6rem 1rem;"
+            f"border-radius:0.4rem;font-weight:600;font-size:1rem;'>"
+            f"{action}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # Headline metrics: overall score + key estimates.
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Score", row.get("score") if pd.notna(row.get("score")) else "—")
-    c2.metric("Margin Potential", row.get("margin_potential") or "—")
-    c3.metric("Competition", row.get("competition_level") or "—")
-    c4.metric("Sourcing Difficulty", row.get("sourcing_difficulty") or "—")
+    c1.metric("Overall Score", row.get("score") if pd.notna(row.get("score")) else "—")
+    c2.metric("Capital Required", _money(row.get("estimated_capital_usd")))
+    c3.metric("Margin Range", _margin_range(row))
+    c4.metric("Win Probability", _pct(row.get("estimated_win_probability")))
+
+    # Six-subscore breakdown.
+    st.markdown("**Subscores**")
+    s1, s2, s3, s4, s5, s6 = st.columns(6)
+    s1.metric("Sourceability",     f"{row.get('sourceability') or '—'} / 20")
+    s2.metric("Competition",       f"{row.get('competition') or '—'} / 20")
+    s3.metric("Profit",            f"{row.get('profit_potential') or '—'} / 20")
+    s4.metric("Capital",           f"{row.get('capital_efficiency') or '—'} / 15")
+    s5.metric("Tech Risk (inv.)",  f"{row.get('technical_risk') or '—'} / 15")
+    s6.metric("Delivery",          f"{row.get('delivery') or '—'} / 10")
 
     def _show(v: Any) -> str:
         """Coerce any cell value to a string so Arrow doesn't choke on the
@@ -427,6 +481,17 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
+    # Recommended-action filter -- the most useful slice for the new scorer.
+    if "recommended_action" in df.columns and df["recommended_action"].notna().any():
+        action_options = sorted(df["recommended_action"].dropna().unique().tolist())
+        action_pick = st.sidebar.multiselect(
+            "Recommended action",
+            action_options,
+            help="BID IMMEDIATELY = top picks; AVOID = red flags.",
+        )
+    else:
+        action_pick = []
+
     fsc_options = sorted(df["fsc"].dropna().unique().tolist())
     fsc_pick = st.sidebar.multiselect("FSC", fsc_options)
 
@@ -463,6 +528,8 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
         lo = hi = None
 
     filtered = df.copy()
+    if action_pick:
+        filtered = filtered[filtered["recommended_action"].isin(action_pick)]
     if fsc_pick:
         filtered = filtered[filtered["fsc"].isin(fsc_pick)]
     if nsn_query:
@@ -534,12 +601,20 @@ def main() -> None:
     filtered = sidebar_filters(df)
 
     # Top-level KPIs.
-    c1, c2, c3, c4 = st.columns(4)
+    has_action = "recommended_action" in filtered.columns
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("RFQs in DB", len(df))
     c2.metric("After filters", len(filtered))
     scored = filtered["score"].dropna()
     c3.metric("Avg score", f"{scored.mean():.0f}" if not scored.empty else "—")
-    c4.metric("Preferred FSC", int((filtered["fsc_category"] == "preferred").sum()))
+    if has_action:
+        bid = int((filtered["recommended_action"] == "BID IMMEDIATELY").sum())
+        investigate = int((filtered["recommended_action"] == "INVESTIGATE SUPPLIER FIRST").sum())
+        c4.metric("BID IMMEDIATELY", bid)
+        c5.metric("Investigate", investigate)
+    else:
+        c4.metric("Preferred FSC", int((filtered["fsc_category"] == "preferred").sum()))
+        c5.metric("Scored", int(filtered["score"].notna().sum()))
 
     tabs = st.tabs(
         [
@@ -554,8 +629,16 @@ def main() -> None:
 
     # ----- Top Opportunities --------------------------------------------------
     with tabs[0]:
-        st.subheader("Top scoring opportunities")
-        top = filtered.dropna(subset=["score"]).sort_values("score", ascending=False).head(25)
+        st.subheader("Top opportunities — BID IMMEDIATELY")
+        st.caption(
+            "Recommended-action = BID IMMEDIATELY (high score, sourceable, "
+            "manageable capital, no red flags). Sorted by overall score."
+        )
+        if has_action:
+            top = filtered[filtered["recommended_action"] == "BID IMMEDIATELY"]
+        else:
+            top = filtered.dropna(subset=["score"])
+        top = top.sort_values("score", ascending=False).head(50)
         render_table(top, key="top_table")
         if not top.empty:
             choice = st.selectbox(
@@ -568,23 +651,34 @@ def main() -> None:
 
     # ----- Needs Review (mid-band) -------------------------------------------
     with tabs[1]:
-        st.subheader("Opportunities to review (score 50-74)")
-        mid = filtered[(filtered["score"] >= 50) & (filtered["score"] < 75)]
-        render_table(mid.sort_values("score", ascending=False), key="mid_table")
+        st.subheader("Needs review — INVESTIGATE SUPPLIER FIRST")
+        st.caption("Promising opportunities that need supplier/pricing verification before quoting.")
+        if has_action:
+            mid = filtered[filtered["recommended_action"] == "INVESTIGATE SUPPLIER FIRST"]
+        else:
+            mid = filtered[(filtered["score"] >= 50) & (filtered["score"] < 75)]
+        mid = mid.sort_values("score", ascending=False)
+        render_table(mid, key="mid_table")
+        if not mid.empty:
+            choice = st.selectbox(
+                "Inspect one",
+                options=mid["solicitation_number"].head(100).tolist(),
+                key="mid_select",
+            )
+            row = mid[mid["solicitation_number"] == choice].iloc[0].to_dict()
+            render_detail(row)
 
     # ----- Avoid --------------------------------------------------------------
     with tabs[2]:
-        st.subheader("Likely avoid (score < 50 or risky FSC)")
-        avoid = filtered[
-            (filtered["score"].fillna(0) < 50) | (filtered["fsc_category"] == "risky")
-        ]
-        render_table(avoid.sort_values("score", ascending=True), key="avoid_table")
-        if not avoid.empty:
-            with st.expander("Why these are flagged"):
-                for _, row in avoid.iterrows():
-                    st.markdown(f"**{row['solicitation_number']}** — {row.get('item_name', '')}")
-                    if row.get("score_notes"):
-                        st.code(row["score_notes"], language="text")
+        st.subheader("Avoid / High Complexity")
+        st.caption("Sole-source, aviation-critical, hazardous, or capital > $50K.")
+        if has_action:
+            avoid = filtered[filtered["recommended_action"] == "AVOID"]
+        else:
+            avoid = filtered[
+                (filtered["score"].fillna(0) < 50) | (filtered["fsc_category"] == "risky")
+            ]
+        render_table(avoid.sort_values("score", ascending=True).head(200), key="avoid_table")
 
     # ----- Search by NSN ------------------------------------------------------
     with tabs[3]:

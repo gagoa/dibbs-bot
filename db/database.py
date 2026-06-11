@@ -83,13 +83,50 @@ def get_connection(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 # Schema
 # ---------------------------------------------------------------------------
 
+# Columns added by the new (v2) scoring framework. We migrate existing
+# databases by running ALTER TABLE ADD COLUMN for any of these that aren't
+# already present. SQLite is happy with that as long as the column doesn't
+# have a NOT NULL constraint (it doesn't).
+_OPPORTUNITY_SCORES_V2_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("sourceability",             "INTEGER"),
+    ("competition",               "INTEGER"),
+    ("profit_potential",          "INTEGER"),
+    ("capital_efficiency",        "INTEGER"),
+    ("technical_risk",            "INTEGER"),
+    ("delivery",                  "INTEGER"),
+    ("estimated_capital_usd",     "INTEGER"),
+    ("estimated_margin_low",      "REAL"),
+    ("estimated_margin_high",     "REAL"),
+    ("estimated_win_probability", "REAL"),
+    ("recommended_action",        "TEXT"),
+)
+
+
+def _migrate_opportunity_scores(conn: sqlite3.Connection) -> None:
+    """Idempotently add v2 columns to opportunity_scores.
+
+    Looks at the live PRAGMA table_info and ALTERs in only what's missing.
+    Safe to run on a fresh DB (no-op) and on an existing DB with the old
+    4-subscore schema (adds the missing columns).
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(opportunity_scores)")}
+    for col, ctype in _OPPORTUNITY_SCORES_V2_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE opportunity_scores ADD COLUMN {col} {ctype}")
+            logger.info("Migrated opportunity_scores: added column %s %s", col, ctype)
+
+
 def init_db(db_path: Path | None = None) -> Path:
-    """Create tables (idempotent). Returns the resolved db path."""
+    """Create tables (idempotent) and migrate to the latest schema.
+
+    Returns the resolved db path. Safe to re-run.
+    """
     path = db_path or SETTINGS.db_path
     path.parent.mkdir(parents=True, exist_ok=True)
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
     with get_connection(path) as conn:
         conn.executescript(sql)
+        _migrate_opportunity_scores(conn)
     logger.info("Initialized database at %s", path)
     return path
 
@@ -150,16 +187,33 @@ def bulk_upsert_rfqs(rfqs: Iterable[dict[str, Any]], db_path: Path | None = None
     return count
 
 
+# Columns we explicitly write on save_score. Anything missing from the score
+# dict is bound to NULL, which is what we want for older scoring runs.
+_SCORE_COLUMNS: tuple[str, ...] = (
+    "rfq_id", "score",
+    # v2 subscores
+    "sourceability", "competition", "profit_potential",
+    "capital_efficiency", "technical_risk", "delivery",
+    # Derived estimates
+    "estimated_capital_usd", "estimated_margin_low", "estimated_margin_high",
+    "estimated_win_probability", "recommended_action",
+    # Legacy KPIs
+    "margin_potential", "competition_level", "sourcing_difficulty", "urgency",
+    "notes",
+)
+
+
 def save_score(conn: sqlite3.Connection, score: dict[str, Any]) -> int:
-    """Insert a new opportunity_scores row. Returns its id."""
-    sql = (
-        "INSERT INTO opportunity_scores "
-        "(rfq_id, score, margin_potential, competition_level, "
-        " sourcing_difficulty, urgency, notes) "
-        "VALUES (:rfq_id, :score, :margin_potential, :competition_level, "
-        "        :sourcing_difficulty, :urgency, :notes)"
-    )
-    cur = conn.execute(sql, score)
+    """Insert a new opportunity_scores row. Returns its id.
+
+    Any keys missing from ``score`` are written as NULL, so callers can pass
+    a partial dict (e.g. a legacy-only payload) without breaking.
+    """
+    payload = {col: score.get(col) for col in _SCORE_COLUMNS}
+    columns = ", ".join(_SCORE_COLUMNS)
+    placeholders = ", ".join(f":{c}" for c in _SCORE_COLUMNS)
+    sql = f"INSERT INTO opportunity_scores ({columns}) VALUES ({placeholders})"
+    cur = conn.execute(sql, payload)
     return int(cur.lastrowid)
 
 
@@ -167,18 +221,27 @@ def save_score(conn: sqlite3.Connection, score: dict[str, Any]) -> int:
 # Read helpers used by the dashboard
 # ---------------------------------------------------------------------------
 
+# All score columns we surface in queries, in the order callers expect.
+_SCORE_SELECT: str = ", ".join(
+    f"s.{col}" for col in (
+        "score",
+        "sourceability", "competition", "profit_potential",
+        "capital_efficiency", "technical_risk", "delivery",
+        "estimated_capital_usd", "estimated_margin_low", "estimated_margin_high",
+        "estimated_win_probability", "recommended_action",
+        "margin_potential", "competition_level", "sourcing_difficulty", "urgency",
+    )
+)
+
+
 def fetch_all_rfqs_with_scores(db_path: Path | None = None) -> list[dict[str, Any]]:
     """Return every RFQ joined with its most recent score (if any)."""
-    sql = """
+    sql = f"""
     SELECT
         r.*,
-        s.score             AS score,
-        s.margin_potential  AS margin_potential,
-        s.competition_level AS competition_level,
-        s.sourcing_difficulty AS sourcing_difficulty,
-        s.urgency           AS urgency,
-        s.notes             AS score_notes,
-        s.created_at        AS scored_at
+        {_SCORE_SELECT},
+        s.notes      AS score_notes,
+        s.created_at AS scored_at
     FROM rfqs r
     LEFT JOIN (
         -- pick the newest score per rfq
@@ -199,24 +262,22 @@ def fetch_all_rfqs_with_scores(db_path: Path | None = None) -> list[dict[str, An
 
 def fetch_rfq_by_id(rfq_id: int, db_path: Path | None = None) -> dict[str, Any] | None:
     """Return a single RFQ row (with its latest score) or None."""
+    sql = f"""
+        SELECT r.*,
+               {_SCORE_SELECT},
+               s.notes AS score_notes,
+               s.created_at AS scored_at
+        FROM rfqs r
+        LEFT JOIN opportunity_scores s
+               ON s.id = (
+                   SELECT id FROM opportunity_scores
+                   WHERE rfq_id = r.id
+                   ORDER BY id DESC LIMIT 1
+               )
+        WHERE r.id = ?
+    """
     with get_connection(db_path) as conn:
-        row = conn.execute(
-            """
-            SELECT r.*,
-                   s.score, s.margin_potential, s.competition_level,
-                   s.sourcing_difficulty, s.urgency,
-                   s.notes AS score_notes, s.created_at AS scored_at
-            FROM rfqs r
-            LEFT JOIN opportunity_scores s
-                   ON s.id = (
-                       SELECT id FROM opportunity_scores
-                       WHERE rfq_id = r.id
-                       ORDER BY id DESC LIMIT 1
-                   )
-            WHERE r.id = ?
-            """,
-            (rfq_id,),
-        ).fetchone()
+        row = conn.execute(sql, (rfq_id,)).fetchone()
     return dict(row) if row else None
 
 

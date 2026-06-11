@@ -187,8 +187,33 @@ python analysis/score_opportunities.py
 
 Reads every RFQ in the DB, computes a fresh score, and inserts a new row into
 `opportunity_scores`. The dashboard always shows the most recent score per
-RFQ. Tune the `WEIGHTS` dict in `analysis/score_opportunities.py` as you
-learn which factors matter most for your operation.
+RFQ.
+
+#### The scoring framework
+
+Every RFQ gets a **0–100 overall score** built from six weighted subscores
+plus derived estimates and a recommended action:
+
+| Subscore           | Max | What it measures                                      |
+| ------------------ | --- | ----------------------------------------------------- |
+| Sourceability      | 20  | Can we find suppliers? Tier-A FSC, friendly keywords, open CAGEs |
+| Competition        | 20  | How crowded is the bid? (Higher = LESS competition)   |
+| Profit potential   | 20  | Estimated gross margin range                          |
+| Capital efficiency | 15  | Fit for a ~$50K-working-capital firm                  |
+| Technical risk     | 15  | Testing / TDP / FAT / hazmat (Higher = LESS risk)     |
+| Delivery           | 10  | Lead time to close (Higher = MORE time)               |
+
+The scorer also produces:
+
+- **Estimated capital required** (quantity × rough unit price by FSC)
+- **Estimated margin range** (low % – high %)
+- **Estimated win probability** (derived from competition + sourceability + CAGE breadth)
+- **Recommended action**: `BID IMMEDIATELY`, `INVESTIGATE SUPPLIER FIRST`, or `AVOID`
+
+Each score comes with a detailed plain-text explanation (visible in the
+dashboard under "Score explanation"). Tune the FSC tiers and unit-price
+table in `analysis/nsn_tools.py`, and the band thresholds in
+`analysis/score_opportunities.py`, as you learn what wins are repeatable.
 
 ### Launch the dashboard
 
@@ -198,15 +223,15 @@ streamlit run app/dashboard.py
 
 Tabs:
 
-- **Top Opportunities** — highest-scored RFQs first
-- **Needs Review** — middle band (50–74) worth a closer look
-- **Avoid / High Complexity** — sub-50 or risky FSC items
+- **Top Opportunities** — RFQs flagged `BID IMMEDIATELY`
+- **Needs Review** — RFQs flagged `INVESTIGATE SUPPLIER FIRST`
+- **Avoid / High Complexity** — RFQs flagged `AVOID` (red flags or low score)
 - **Search by NSN** — substring search across all NSNs
 - **Search by FSC** — multi-select with friendly FSC labels
 - **All RFQs** — full table with a CSV download button
 
-Filters in the sidebar (FSC, NSN, set-aside, score range, close date,
-TDP availability) apply to every tab.
+Filters in the sidebar (recommended action, FSC, NSN, set-aside, score
+range, close date, TDP availability) apply to every tab.
 
 ---
 
