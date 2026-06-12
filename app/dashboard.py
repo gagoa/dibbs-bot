@@ -383,14 +383,44 @@ _ACTION_COLORS: dict[str, str] = {
 }
 
 
+def _isna(v: Any) -> bool:
+    """Robust missing-value check that handles None, pd.NA, np.nan, and strs.
+
+    The pandas family of NaN markers (np.nan, pd.NA, pd.NaT) doesn't compare
+    equal to anything, so ``v is None`` alone isn't enough once a value has
+    round-tripped through a DataFrame. We feed it through ``pd.isna`` for
+    everything that isn't already a string.
+    """
+    if v is None:
+        return True
+    if isinstance(v, str):
+        return False
+    try:
+        return bool(pd.isna(v))
+    except (TypeError, ValueError):
+        return False
+
+
+def _score_cell(v: Any, denom: int) -> str:
+    """Render a subscore as '<n> / <denom>'. Uses an em-dash if missing.
+
+    IMPORTANT: this is NOT ``v or '—'`` because a legitimate score of 0
+    (e.g. ``delivery=0`` for an already-closed RFQ) is falsy in Python and
+    would silently render as missing.
+    """
+    if _isna(v):
+        return f"— / {denom}"
+    return f"{int(v)} / {denom}"
+
+
 def _money(v: Any) -> str:
-    if v is None or (isinstance(v, float) and pd.isna(v)):
+    if _isna(v):
         return "—"
     return f"~${int(v):,}"
 
 
 def _pct(v: Any) -> str:
-    if v is None or (isinstance(v, float) and pd.isna(v)):
+    if _isna(v):
         return "—"
     return f"{int(round(float(v) * 100))}%"
 
@@ -398,7 +428,7 @@ def _pct(v: Any) -> str:
 def _margin_range(row: dict[str, Any]) -> str:
     lo = row.get("estimated_margin_low")
     hi = row.get("estimated_margin_high")
-    if lo is None or hi is None:
+    if _isna(lo) or _isna(hi):
         return "—"
     return f"{lo:g}% – {hi:g}%"
 
@@ -410,7 +440,7 @@ def render_detail(row: dict[str, Any]) -> None:
 
     # Big colored recommended-action banner up top.
     action = row.get("recommended_action")
-    if action:
+    if action and not _isna(action):
         color = _ACTION_COLORS.get(action, "#6b7280")
         st.markdown(
             f"<div style='background:{color};color:white;padding:0.6rem 1rem;"
@@ -418,10 +448,19 @@ def render_detail(row: dict[str, Any]) -> None:
             f"{action}</div>",
             unsafe_allow_html=True,
         )
+    else:
+        # Likely an RFQ that hasn't been scored under the v2 framework yet.
+        # Tell the user how to fix it instead of silently showing blank tiles.
+        st.warning(
+            "This RFQ doesn't have a recommended action yet — it was scored "
+            "under the old framework. Click **Re-score** in the sidebar to "
+            "apply the new 6-subscore framework to every row in the DB."
+        )
 
     # Headline metrics: overall score + key estimates.
+    score_val = row.get("score")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Overall Score", row.get("score") if pd.notna(row.get("score")) else "—")
+    c1.metric("Overall Score", "—" if _isna(score_val) else int(score_val))
     c2.metric("Capital Required", _money(row.get("estimated_capital_usd")))
     c3.metric("Margin Range", _margin_range(row))
     c4.metric("Win Probability", _pct(row.get("estimated_win_probability")))
@@ -429,12 +468,12 @@ def render_detail(row: dict[str, Any]) -> None:
     # Six-subscore breakdown.
     st.markdown("**Subscores**")
     s1, s2, s3, s4, s5, s6 = st.columns(6)
-    s1.metric("Sourceability",     f"{row.get('sourceability') or '—'} / 20")
-    s2.metric("Competition",       f"{row.get('competition') or '—'} / 20")
-    s3.metric("Profit",            f"{row.get('profit_potential') or '—'} / 20")
-    s4.metric("Capital",           f"{row.get('capital_efficiency') or '—'} / 15")
-    s5.metric("Tech Risk (inv.)",  f"{row.get('technical_risk') or '—'} / 15")
-    s6.metric("Delivery",          f"{row.get('delivery') or '—'} / 10")
+    s1.metric("Sourceability",    _score_cell(row.get("sourceability"),      20))
+    s2.metric("Competition",      _score_cell(row.get("competition"),        20))
+    s3.metric("Profit",           _score_cell(row.get("profit_potential"),   20))
+    s4.metric("Capital",          _score_cell(row.get("capital_efficiency"), 15))
+    s5.metric("Tech Risk (inv.)", _score_cell(row.get("technical_risk"),     15))
+    s6.metric("Delivery",         _score_cell(row.get("delivery"),           10))
 
     def _show(v: Any) -> str:
         """Coerce any cell value to a string so Arrow doesn't choke on the
