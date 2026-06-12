@@ -191,28 +191,46 @@ RFQ.
 
 #### The scoring framework
 
-Every RFQ gets a **0–100 overall score** built from six weighted subscores
+Every RFQ gets a **0–100 overall score** built from seven weighted subscores
 plus derived estimates and a recommended action:
 
-| Subscore           | Max | What it measures                                      |
-| ------------------ | --- | ----------------------------------------------------- |
-| Sourceability      | 20  | Can we find suppliers? Tier-A FSC, friendly keywords, open CAGEs |
-| Competition        | 20  | How crowded is the bid? (Higher = LESS competition)   |
-| Profit potential   | 20  | Estimated gross margin range                          |
-| Capital efficiency | 15  | Fit for a ~$50K-working-capital firm                  |
-| Technical risk     | 15  | Testing / TDP / FAT / hazmat (Higher = LESS risk)     |
-| Delivery           | 10  | Lead time to close (Higher = MORE time)               |
+| Subscore           | Max | What it measures                                                  |
+| ------------------ | --- | ----------------------------------------------------------------- |
+| Sourceability      | 18  | Can we find suppliers? Tier-A/B FSC, open CAGEs, friendly keywords|
+| Competition        | 15  | How crowded is the bid? (Higher = LESS competition)               |
+| Profit potential   | 15  | Estimated gross margin range                                      |
+| Time-to-Quote      | 15  | How fast can we research + quote? (Higher = FASTER quote)         |
+| Technical risk     | 15  | Testing / TDP / FAT / hazmat (Higher = LESS risk)                 |
+| Capital efficiency | 12  | Fit for a ~$50K-working-capital firm                              |
+| Delivery           | 10  | Sweet spot 30–60 days (too short = rushed, too long = ties capital) |
 
 The scorer also produces:
 
 - **Estimated capital required** (quantity × rough unit price by FSC)
 - **Estimated margin range** (low % – high %)
-- **Estimated win probability** (derived from competition + sourceability + CAGE breadth)
+- **Estimated quote hours** (15 min – 6+ hours)
+- **Estimated profit per hour of procurement effort** — the key throughput
+  metric for a one-person operation
+- **Estimated win probability** (0–1)
 - **Recommended action**: `BID IMMEDIATELY`, `INVESTIGATE SUPPLIER FIRST`, or `AVOID`
+
+Calibration notes:
+
+- **Universe is broad.** Every item a small distributor could realistically
+  source is scored. Fasteners are *not* preferentially favored — they're
+  commodity (Tier C). Unknown FSCs default to Tier B (sourceable).
+- **Aggressive penalties** for sole-source CAGEs, TDP/build-to-print,
+  aerospace-critical keywords, capital > $25K, custom manufacturing, etc.
+- **Hard ceilings** prevent inflation: a sole-source RFQ caps at 84, TDP at
+  89, Tier-D (weapons/medical/hazmat) at 74, custom-engineered at 49.
+- **Perfect-score gating**: a score ≥95 requires *all* of: multi-supplier,
+  margin top ≥25%, low competition, capital <20% of budget, delivery in
+  30–60d, low tech risk, no compliance concerns, and quote-time ≤1h.
+- **Target distribution**: avg 55–70, top 5% ≥85, top 0.5% ≥95.
 
 Each score comes with a detailed plain-text explanation (visible in the
 dashboard under "Score explanation"). Tune the FSC tiers and unit-price
-table in `analysis/nsn_tools.py`, and the band thresholds in
+table in `analysis/nsn_tools.py`, and the band thresholds + ceilings in
 `analysis/score_opportunities.py`, as you learn what wins are repeatable.
 
 ### Launch the dashboard
@@ -252,27 +270,6 @@ Defaults work out of the box; you only need a `.env` to override.
 | `SAM_GOV_API_KEY`      | *(blank)*                                            | Reserved for optional sam.gov integration    |
 
 Secrets must come from `.env` or the shell environment. Never commit `.env`.
-
----
-
-## Scoring model (cheat sheet)
-
-Each RFQ starts at 50 and is adjusted by:
-
-- **FSC bucket** — preferred FSCs (5305, 5310, 5325, 5340, 5935, 5975, 5998,
-  6145, 6150) add points; risky FSCs (1560, 1650, 1680, 2840, 2915, 5995,
-  8145) subtract.
-- **Item-name keywords** — "screw / nut / connector / cable" raise the score;
-  "aircraft / turbine / weapon / hydraulic" lower it.
-- **Quantity** — sweet spot is 100–10,000 units.
-- **Close date** — comfortable (>14 days) is good; under 7 days hurts;
-  already closed is heavily penalized.
-- **Set-aside** — small-business friendly boosts; sole-source kills.
-- **TDP available** — usually signals build complexity; small penalty.
-- **Approved sources** — open is good; single CAGE is restrictive.
-
-Every adjustment is written to `opportunity_scores.notes` so you can see
-exactly why an RFQ scored what it did.
 
 ---
 

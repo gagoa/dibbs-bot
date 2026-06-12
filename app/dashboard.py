@@ -449,12 +449,12 @@ def render_detail(row: dict[str, Any]) -> None:
             unsafe_allow_html=True,
         )
     else:
-        # Likely an RFQ that hasn't been scored under the v2 framework yet.
-        # Tell the user how to fix it instead of silently showing blank tiles.
+        # Likely an RFQ that hasn't been scored under the v3 framework yet.
         st.warning(
             "This RFQ doesn't have a recommended action yet — it was scored "
-            "under the old framework. Click **Re-score** in the sidebar to "
-            "apply the new 6-subscore framework to every row in the DB."
+            "under an older framework. Click **Re-score** in the sidebar to "
+            "apply the new 7-subscore framework (now including Time-to-Quote "
+            "and Profit/Hour) to every row in the DB."
         )
 
     # Headline metrics: overall score + key estimates.
@@ -465,15 +465,24 @@ def render_detail(row: dict[str, Any]) -> None:
     c3.metric("Margin Range", _margin_range(row))
     c4.metric("Win Probability", _pct(row.get("estimated_win_probability")))
 
-    # Six-subscore breakdown.
+    # Time + profit-per-hour row -- key for a one-person operation.
+    t1, t2 = st.columns(2)
+    qh = row.get("estimated_quote_hours")
+    t1.metric("Est. quote time", "—" if _isna(qh) else f"~{float(qh):g}h")
+    pph = row.get("estimated_profit_per_hour")
+    t2.metric("Profit / hour", "—" if _isna(pph) else f"~${float(pph):,.0f}/h")
+
+    # Seven-subscore breakdown.
     st.markdown("**Subscores**")
-    s1, s2, s3, s4, s5, s6 = st.columns(6)
-    s1.metric("Sourceability",    _score_cell(row.get("sourceability"),      20))
-    s2.metric("Competition",      _score_cell(row.get("competition"),        20))
-    s3.metric("Profit",           _score_cell(row.get("profit_potential"),   20))
-    s4.metric("Capital",          _score_cell(row.get("capital_efficiency"), 15))
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Sourceability",    _score_cell(row.get("sourceability"),      18))
+    s2.metric("Competition",      _score_cell(row.get("competition"),        15))
+    s3.metric("Profit",           _score_cell(row.get("profit_potential"),   15))
+    s4.metric("Time-to-Quote",    _score_cell(row.get("time_to_quote"),      15))
+    s5, s6, s7, _ = st.columns(4)
     s5.metric("Tech Risk (inv.)", _score_cell(row.get("technical_risk"),     15))
-    s6.metric("Delivery",         _score_cell(row.get("delivery"),           10))
+    s6.metric("Capital",          _score_cell(row.get("capital_efficiency"), 12))
+    s7.metric("Delivery",         _score_cell(row.get("delivery"),           10))
 
     def _show(v: Any) -> str:
         """Coerce any cell value to a string so Arrow doesn't choke on the
@@ -519,6 +528,15 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
 
     if df.empty:
         return df
+
+    # "Open only" hides RFQs whose close_date has already passed. ON by
+    # default because closed solicitations aren't actionable -- they're only
+    # kept for history. Turn off if you want to inspect the full DB.
+    open_only = st.sidebar.toggle(
+        "Open only (hide closed)",
+        value=True,
+        help="Hide RFQs whose close date has already passed.",
+    )
 
     # Recommended-action filter -- the most useful slice for the new scorer.
     if "recommended_action" in df.columns and df["recommended_action"].notna().any():
@@ -567,6 +585,13 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
         lo = hi = None
 
     filtered = df.copy()
+    if open_only and "close_date" in filtered.columns:
+        today_d = date.today()
+        # NaT/None close dates are kept (we can't prove they're closed).
+        mask = filtered["close_date"].apply(
+            lambda d: True if pd.isna(d) or d is None else d >= today_d
+        )
+        filtered = filtered[mask]
     if action_pick:
         filtered = filtered[filtered["recommended_action"].isin(action_pick)]
     if fsc_pick:

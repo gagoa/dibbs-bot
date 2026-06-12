@@ -99,6 +99,10 @@ _OPPORTUNITY_SCORES_V2_COLUMNS: tuple[tuple[str, str], ...] = (
     ("estimated_margin_high",     "REAL"),
     ("estimated_win_probability", "REAL"),
     ("recommended_action",        "TEXT"),
+    # v3 additions: time-to-quote subscore + derived profit-per-hour
+    ("time_to_quote",             "INTEGER"),
+    ("estimated_quote_hours",     "REAL"),
+    ("estimated_profit_per_hour", "REAL"),
 )
 
 
@@ -191,13 +195,14 @@ def bulk_upsert_rfqs(rfqs: Iterable[dict[str, Any]], db_path: Path | None = None
 # dict is bound to NULL, which is what we want for older scoring runs.
 _SCORE_COLUMNS: tuple[str, ...] = (
     "rfq_id", "score",
-    # v2 subscores
-    "sourceability", "competition", "profit_potential",
+    # Seven subscores
+    "sourceability", "competition", "profit_potential", "time_to_quote",
     "capital_efficiency", "technical_risk", "delivery",
     # Derived estimates
     "estimated_capital_usd", "estimated_margin_low", "estimated_margin_high",
-    "estimated_win_probability", "recommended_action",
-    # Legacy KPIs
+    "estimated_win_probability", "estimated_quote_hours",
+    "estimated_profit_per_hour", "recommended_action",
+    # Legacy KPIs (kept for backward compat)
     "margin_potential", "competition_level", "sourcing_difficulty", "urgency",
     "notes",
 )
@@ -225,10 +230,11 @@ def save_score(conn: sqlite3.Connection, score: dict[str, Any]) -> int:
 _SCORE_SELECT: str = ", ".join(
     f"s.{col}" for col in (
         "score",
-        "sourceability", "competition", "profit_potential",
+        "sourceability", "competition", "profit_potential", "time_to_quote",
         "capital_efficiency", "technical_risk", "delivery",
         "estimated_capital_usd", "estimated_margin_low", "estimated_margin_high",
-        "estimated_win_probability", "recommended_action",
+        "estimated_win_probability", "estimated_quote_hours",
+        "estimated_profit_per_hour", "recommended_action",
         "margin_potential", "competition_level", "sourcing_difficulty", "urgency",
     )
 )
