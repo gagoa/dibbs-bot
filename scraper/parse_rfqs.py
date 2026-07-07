@@ -186,6 +186,7 @@ def build_rfq(record: dict[str, Any], raw_text: str | None = None) -> dict[str, 
         "buyer": canon.get("buyer"),
         "approved_source_cages": _clean_list(canon.get("approved_source_cages")),
         "manufacturer_part_numbers": _clean_list(canon.get("manufacturer_part_numbers")),
+        "amsc": (str(canon.get("amsc") or "").strip().upper() or None),
         "technical_documents_available": _to_bool(
             canon.get("technical_documents_available")
         ),
@@ -322,6 +323,7 @@ def _parse_daily_index_line(line: str) -> dict[str, Any] | None:
         "buyer": raw["buyer_code"].strip() or None,
         "approved_source_cages": None,  # not in this file (detail-page only)
         "manufacturer_part_numbers": mpn,
+        "amsc": raw["amsc"].strip().upper() or None,
         "technical_documents_available": 0,
         "url": url,
         "raw_text": line,

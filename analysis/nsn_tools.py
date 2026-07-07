@@ -3,8 +3,11 @@
 Everything here is pure-Python and side-effect free so it's easy to unit test
 and reuse from both the scorer and the dashboard.
 
-This module backs the new 6-subscore framework, which categorizes every FSC
-into one of four tiers:
+This module backs the 7-subscore scoring framework. It provides two core
+classifications: FSC tiers (what kind of item is this?) and AMSC buckets
+(how does the government say it can be bought?).
+
+FSC tiers:
 
 * TIER_A -- "strongly preferred" commercial/industrial parts
             (bearings, hoses, gaskets, filters, fasteners, hardware).
@@ -238,6 +241,100 @@ TIER_D_FSCS: dict[str, str] = {
     # Specialized shipping containers (often custom-built)
     "8145": "Specialized Shipping and Storage Containers",
 }
+
+
+# ---------------------------------------------------------------------------
+# AMSC (Acquisition Method Suffix Code) classification.
+#
+# The DIBBS daily index carries a one-letter AMSC for every solicitation.
+# It's the government's own statement of HOW the item can be bought, which
+# makes it the single strongest "can a small distributor actually source
+# this?" signal we have:
+#
+#   Z  Commercial / COTS item              -> easiest possible sourcing
+#   G  Gov't owns full tech data package   -> full & open competition
+#   L,U  screened / breakout-uneconomical  -> sources may exist; check
+#   K,M,N,T,V,Y  qualification barriers    -> QPL, special tooling/testing
+#   B,C,D,H,P,Q,R,S  data/source locked    -> approved-source only; a
+#                                             beginner effectively can't bid
+#
+# Definitions per DFARS PGI 217.7506 (Spare Parts Breakout Program).
+# ---------------------------------------------------------------------------
+
+AMSC_COMMERCIAL: dict[str, str] = {
+    "Z": "Commercial / off-the-shelf item (easiest sourcing)",
+}
+
+AMSC_OPEN: dict[str, str] = {
+    "G": "Gov't owns full tech data; full & open competition",
+}
+
+AMSC_MODERATE: dict[str, str] = {
+    "L": "Low annual buy value; additional sources may exist",
+    "U": "Competitive breakout deemed uneconomical; sources may exist",
+}
+
+# Qualification / tooling barriers -- biddable in theory, hard in practice.
+AMSC_QUALIFIED: dict[str, str] = {
+    "K": "Requires approved class-1 castings/forgings",
+    "M": "Requires master / coordinated tooling",
+    "N": "Requires special test / inspection facilities",
+    "T": "QPL/QML item; qualified sources only",
+    "V": "High-reliability part; controlled",
+    "Y": "Unstable design; limited buys from current source",
+}
+
+# Data or source restrictions -- effectively approved-source-only.
+AMSC_RESTRICTED: dict[str, str] = {
+    "B": "Source-control drawing; listed sources only",
+    "C": "Engineering source approval required",
+    "D": "Tech data not available; current source(s) only",
+    "H": "Gov't lacks usable data (interim code)",
+    "P": "Data rights not owned; cannot add sources",
+    "Q": "Data inadequate; breakout still pending",
+    "R": "Data rights not owned / not purchasable",
+    "S": "Militarily sensitive; approved sources only",
+}
+
+_AMSC_ALL: dict[str, str] = {
+    **AMSC_COMMERCIAL, **AMSC_OPEN, **AMSC_MODERATE,
+    **AMSC_QUALIFIED, **AMSC_RESTRICTED,
+}
+
+
+@dataclass(frozen=True)
+class AmscInfo:
+    """Classification for one AMSC letter."""
+
+    code: str
+    label: str
+    bucket: str  # "commercial" | "open" | "moderate" | "qualified" | "restricted" | "unknown"
+
+
+def classify_amsc(amsc: str | None) -> AmscInfo:
+    """Classify a one-letter AMSC into a sourcing-ease bucket."""
+    code = (amsc or "").strip().upper()
+    if not code:
+        return AmscInfo(code="", label="Not provided", bucket="unknown")
+    if code in AMSC_COMMERCIAL:
+        return AmscInfo(code=code, label=AMSC_COMMERCIAL[code], bucket="commercial")
+    if code in AMSC_OPEN:
+        return AmscInfo(code=code, label=AMSC_OPEN[code], bucket="open")
+    if code in AMSC_MODERATE:
+        return AmscInfo(code=code, label=AMSC_MODERATE[code], bucket="moderate")
+    if code in AMSC_QUALIFIED:
+        return AmscInfo(code=code, label=AMSC_QUALIFIED[code], bucket="qualified")
+    if code in AMSC_RESTRICTED:
+        return AmscInfo(code=code, label=AMSC_RESTRICTED[code], bucket="restricted")
+    return AmscInfo(code=code, label="Unrecognized AMSC", bucket="unknown")
+
+
+def amsc_label(amsc: str | None) -> str:
+    """Human-readable one-liner for an AMSC letter (for the dashboard)."""
+    code = (amsc or "").strip().upper()
+    if not code:
+        return ""
+    return _AMSC_ALL.get(code, "Unrecognized")
 
 
 # ---------------------------------------------------------------------------

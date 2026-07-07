@@ -15,8 +15,10 @@ dashboard for day-to-day use.
 1. Stores RFQs (Request for Quotes) from DIBBS in a local SQLite database.
 2. Parses CSV / HTML / TXT files dropped into `scraper/sample_data/` into
    normalized rows.
-3. Scores each RFQ from 0–100 using transparent, tunable heuristics (FSC
-   category, quantity, close date, approved sources, TDP, set-aside, etc.).
+3. Scores each RFQ from 0–100 using transparent, tunable heuristics (AMSC,
+   FSC category, quantity, close date, approved sources, TDP, set-aside,
+   etc.), tuned to surface beginner-friendly contracts with good margins
+   and easy sourcing at the top.
 4. Surfaces results in a Streamlit dashboard with tabs for **Top
    Opportunities**, **Needs Review**, **Avoid / High Complexity**, and search
    by NSN / FSC.
@@ -191,47 +193,62 @@ RFQ.
 
 #### The scoring framework
 
-Every RFQ gets a **0–100 overall score** built from seven weighted subscores
-plus derived estimates and a recommended action:
+Every RFQ gets a **0–100 overall score**, tuned so the top of the list is
+what a **beginning contractor** should bid on: easy sourceability, good
+profit (in % *and* dollars), and manageable capital/risk. Seven weighted
+subscores sum to 100:
 
-| Subscore           | Max | What it measures                                                  |
-| ------------------ | --- | ----------------------------------------------------------------- |
-| Sourceability      | 18  | Can we find suppliers? Tier-A/B FSC, open CAGEs, friendly keywords|
-| Competition        | 15  | How crowded is the bid? (Higher = LESS competition)               |
-| Profit potential   | 15  | Estimated gross margin range                                      |
-| Time-to-Quote      | 15  | How fast can we research + quote? (Higher = FASTER quote)         |
-| Technical risk     | 15  | Testing / TDP / FAT / hazmat (Higher = LESS risk)                 |
-| Capital efficiency | 12  | Fit for a ~$50K-working-capital firm                              |
-| Delivery           | 10  | Sweet spot 30–60 days (too short = rushed, too long = ties capital) |
+| Subscore           | Max | What it measures                                                    |
+| ------------------ | --- | ------------------------------------------------------------------- |
+| Sourceability      | 25  | AMSC-driven: can a beginner actually find and buy this part?        |
+| Profit potential   | 20  | Margin % AND expected profit dollars (30% of $150 is pocket change) |
+| Technical risk     | 15  | Testing / TDP / QPL / hazmat (Higher = LESS risk)                   |
+| Competition        | 12  | How crowded is the bid? (Higher = LESS competition)                 |
+| Time-to-Quote      | 10  | How fast can we research + quote? (Higher = FASTER quote)           |
+| Capital efficiency | 10  | Sweet spot $500–$5K: real money, survivable if it goes wrong        |
+| Response window    | 8   | Days until close; 7–35 days = time to research without rushing     |
+
+**AMSC is the backbone of sourceability.** The daily-index files carry a
+one-letter Acquisition Method Suffix Code for every solicitation — the
+government's own statement of how the item can be bought:
+
+- **Z** (commercial/COTS) and **G** (gov't owns the full tech data package)
+  are open to everyone — these dominate the top of the leaderboard.
+- **L / U** (screened / breakout-uneconomical): sources may exist; check.
+- **K / M / N / T / V / Y** (QPL, special tooling/testing): capped at 68.
+- **B / C / D / H / P / Q / R / S** (approved-source-only): capped at 54 and
+  flagged `AVOID` — a newcomer effectively can't win these.
 
 The scorer also produces:
 
 - **Estimated capital required** (quantity × rough unit price by FSC)
-- **Estimated margin range** (low % – high %)
+- **Estimated margin range** (low % – high %), adjusted by AMSC
+- **Expected profit dollars** (capital × mid-margin)
 - **Estimated quote hours** (15 min – 6+ hours)
 - **Estimated profit per hour of procurement effort** — the key throughput
   metric for a one-person operation
-- **Estimated win probability** (0–1)
+- **Estimated win probability** (0–1), AMSC-weighted
 - **Recommended action**: `BID IMMEDIATELY`, `INVESTIGATE SUPPLIER FIRST`, or `AVOID`
 
 Calibration notes:
 
-- **Universe is broad.** Every item a small distributor could realistically
-  source is scored. Fasteners are *not* preferentially favored — they're
-  commodity (Tier C). Unknown FSCs default to Tier B (sourceable).
-- **Aggressive penalties** for sole-source CAGEs, TDP/build-to-print,
-  aerospace-critical keywords, capital > $25K, custom manufacturing, etc.
-- **Hard ceilings** prevent inflation: a sole-source RFQ caps at 84, TDP at
-  89, Tier-D (weapons/medical/hazmat) at 74, custom-engineered at 49.
-- **Perfect-score gating**: a score ≥95 requires *all* of: multi-supplier,
-  margin top ≥25%, low competition, capital <20% of budget, delivery in
-  30–60d, low tech risk, no compliance concerns, and quote-time ≤1h.
-- **Target distribution**: avg 55–70, top 5% ≥85, top 0.5% ≥95.
+- **Hard ceilings** keep one strong subscore from masking a disqualifier:
+  restricted AMSC caps at 54, sole-source CAGE at 65, qualified AMSC at 68,
+  Tier-D FSC (weapons/medical/hazmat) at 70, risky keywords at 80, TDP at
+  85, custom-engineered at 45, expected profit under $100 at 55, closed at 35.
+- **`BID IMMEDIATELY` is selective**: score ≥80 with *no* ceiling in play —
+  roughly the top 5% of a typical daily pull.
+- **Perfect-score gating**: ≥95 requires the full beginner-dream checklist:
+  AMSC Z/G, multi-supplier, margin top ≥20%, expected profit ≥$500, low
+  competition, capital ≤$10K, a 7–45 day window, low tech risk, no
+  compliance concerns, and quote-time ≤1h.
+- **Typical distribution** on live data: average ~55, top 5% ≥80.
 
 Each score comes with a detailed plain-text explanation (visible in the
-dashboard under "Score explanation"). Tune the FSC tiers and unit-price
-table in `analysis/nsn_tools.py`, and the band thresholds + ceilings in
-`analysis/score_opportunities.py`, as you learn what wins are repeatable.
+dashboard under "Score explanation"). Tune the FSC tiers, AMSC buckets, and
+unit-price table in `analysis/nsn_tools.py`, and the band thresholds +
+ceilings in `analysis/score_opportunities.py`, as you learn what wins are
+repeatable.
 
 ### Launch the dashboard
 
@@ -248,8 +265,9 @@ Tabs:
 - **Search by FSC** — multi-select with friendly FSC labels
 - **All RFQs** — full table with a CSV download button
 
-Filters in the sidebar (recommended action, FSC, NSN, set-aside, score
-range, close date, TDP availability) apply to every tab.
+Filters in the sidebar (recommended action, AMSC — including an
+"Easy sourcing only (Z/G)" toggle, FSC, NSN, set-aside, score range, close
+date, TDP availability) apply to every tab.
 
 ---
 

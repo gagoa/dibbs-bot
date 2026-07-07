@@ -24,7 +24,12 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from analysis.nsn_tools import PREFERRED_FSCS, RISKY_FSCS, classify_fsc  # noqa: E402
+from analysis.nsn_tools import (  # noqa: E402
+    PREFERRED_FSCS,
+    RISKY_FSCS,
+    amsc_label,
+    classify_fsc,
+)
 from analysis.score_opportunities import score_all  # noqa: E402
 from db.database import count_rfqs, fetch_all_rfqs_with_scores, init_db  # noqa: E402
 from scraper.fetch_rfqs import DibbsSession, fetch_recent_indexes  # noqa: E402
@@ -334,14 +339,18 @@ def _days_until_close(d: Any) -> int | None:
 
 TABLE_COLUMNS = [
     "score",
+    "grade",
     "recommended_action",
     "solicitation_number",
+    "amsc",
     "nsn",
     "fsc",
     "item_name",
     "quantity",
     "unit_of_issue",
     "estimated_capital_usd",
+    "margin_range",
+    "estimated_profit_per_hour",
     "close_date",
     "set_aside",
     "approved_source_cages",
@@ -349,23 +358,50 @@ TABLE_COLUMNS = [
 ]
 
 
+def _grade(score: Any) -> str:
+    """Letter grade for an overall score -- quick visual triage."""
+    if _isna(score):
+        return "—"
+    s = float(score)
+    if s >= 90:
+        return "A+"
+    if s >= 80:
+        return "A"
+    if s >= 70:
+        return "B"
+    if s >= 60:
+        return "C"
+    if s >= 45:
+        return "D"
+    return "F"
+
+
 def render_table(df: pd.DataFrame, *, key: str | None = None) -> None:
     """Render the RFQ table with a consistent column order."""
     if df.empty:
         st.info("No RFQs match the current filters.")
         return
+    df = df.copy()
+    if "score" in df.columns:
+        df["grade"] = df["score"].apply(_grade)
+    if "estimated_margin_low" in df.columns and "estimated_margin_high" in df.columns:
+        df["margin_range"] = df.apply(_margin_range, axis=1)
     cols = [c for c in TABLE_COLUMNS if c in df.columns]
     view = df[cols].rename(
         columns={
             "score": "Score",
+            "grade": "Grade",
             "recommended_action": "Action",
             "solicitation_number": "Solicitation",
+            "amsc": "AMSC",
             "nsn": "NSN",
             "fsc": "FSC",
             "item_name": "Item",
             "quantity": "Qty",
             "unit_of_issue": "UoI",
             "estimated_capital_usd": "Est. Capital",
+            "margin_range": "Est. Margin",
+            "estimated_profit_per_hour": "Profit/h",
             "close_date": "Closes",
             "set_aside": "Set-Aside",
             "approved_source_cages": "Approved CAGEs",
@@ -453,8 +489,8 @@ def render_detail(row: dict[str, Any]) -> None:
         st.warning(
             "This RFQ doesn't have a recommended action yet — it was scored "
             "under an older framework. Click **Re-score** in the sidebar to "
-            "apply the new 7-subscore framework (now including Time-to-Quote "
-            "and Profit/Hour) to every row in the DB."
+            "apply the current beginner-focused framework to every row in "
+            "the DB."
         )
 
     # Headline metrics: overall score + key estimates.
@@ -475,14 +511,14 @@ def render_detail(row: dict[str, Any]) -> None:
     # Seven-subscore breakdown.
     st.markdown("**Subscores**")
     s1, s2, s3, s4 = st.columns(4)
-    s1.metric("Sourceability",    _score_cell(row.get("sourceability"),      18))
-    s2.metric("Competition",      _score_cell(row.get("competition"),        15))
-    s3.metric("Profit",           _score_cell(row.get("profit_potential"),   15))
-    s4.metric("Time-to-Quote",    _score_cell(row.get("time_to_quote"),      15))
+    s1.metric("Sourceability",    _score_cell(row.get("sourceability"),      25))
+    s2.metric("Profit",           _score_cell(row.get("profit_potential"),   20))
+    s3.metric("Tech Risk (inv.)", _score_cell(row.get("technical_risk"),     15))
+    s4.metric("Competition",      _score_cell(row.get("competition"),        12))
     s5, s6, s7, _ = st.columns(4)
-    s5.metric("Tech Risk (inv.)", _score_cell(row.get("technical_risk"),     15))
-    s6.metric("Capital",          _score_cell(row.get("capital_efficiency"), 12))
-    s7.metric("Delivery",         _score_cell(row.get("delivery"),           10))
+    s5.metric("Time-to-Quote",    _score_cell(row.get("time_to_quote"),      10))
+    s6.metric("Capital",          _score_cell(row.get("capital_efficiency"), 10))
+    s7.metric("Response Window",  _score_cell(row.get("delivery"),            8))
 
     def _show(v: Any) -> str:
         """Coerce any cell value to a string so Arrow doesn't choke on the
@@ -491,9 +527,16 @@ def render_detail(row: dict[str, Any]) -> None:
             return "—"
         return str(v)
 
+    amsc_val = row.get("amsc")
+    amsc_display = "—"
+    if amsc_val and not _isna(amsc_val):
+        desc = amsc_label(str(amsc_val))
+        amsc_display = f"{amsc_val} — {desc}" if desc else str(amsc_val)
+
     info_rows = {
         "NSN": _show(row.get("nsn")),
         "FSC": _show(row.get("fsc")),
+        "AMSC": amsc_display,
         "Quantity": f"{_show(row.get('quantity'))} {row.get('unit_of_issue') or ''}".strip(),
         "Close date": _show(row.get("close_date")),
         "Set-aside": _show(row.get("set_aside")),
@@ -549,6 +592,27 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
     else:
         action_pick = []
 
+    # AMSC filter -- the #1 beginner filter. Z (commercial) and G (gov't owns
+    # the tech data) are the codes anyone can source and bid.
+    easy_amsc_only = False
+    amsc_pick: list[str] = []
+    if "amsc" in df.columns and df["amsc"].notna().any():
+        easy_amsc_only = st.sidebar.toggle(
+            "Easy sourcing only (AMSC Z / G)",
+            value=False,
+            help="Show only commercial/COTS items (Z) and items where the "
+                 "government owns the full tech data package (G). These are "
+                 "the two codes a beginner can always source and bid.",
+        )
+        amsc_options = sorted(df["amsc"].dropna().unique().tolist())
+        amsc_pick = st.sidebar.multiselect(
+            "AMSC",
+            amsc_options,
+            format_func=lambda c: f"{c} — {amsc_label(c)}" if amsc_label(c) else c,
+            help="Acquisition Method Suffix Code: how the government says "
+                 "this item can be bought.",
+        )
+
     fsc_options = sorted(df["fsc"].dropna().unique().tolist())
     fsc_pick = st.sidebar.multiselect("FSC", fsc_options)
 
@@ -594,6 +658,10 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
         filtered = filtered[mask]
     if action_pick:
         filtered = filtered[filtered["recommended_action"].isin(action_pick)]
+    if easy_amsc_only and "amsc" in filtered.columns:
+        filtered = filtered[filtered["amsc"].fillna("").str.upper().isin(["Z", "G"])]
+    if amsc_pick:
+        filtered = filtered[filtered["amsc"].isin(amsc_pick)]
     if fsc_pick:
         filtered = filtered[filtered["fsc"].isin(fsc_pick)]
     if nsn_query:
@@ -695,8 +763,8 @@ def main() -> None:
     with tabs[0]:
         st.subheader("Top opportunities — BID IMMEDIATELY")
         st.caption(
-            "Recommended-action = BID IMMEDIATELY (high score, sourceable, "
-            "manageable capital, no red flags). Sorted by overall score."
+            "Beginner-friendly picks: open sourcing (AMSC Z/G), good profit, "
+            "manageable capital, no red flags. Sorted by overall score."
         )
         if has_action:
             top = filtered[filtered["recommended_action"] == "BID IMMEDIATELY"]
@@ -735,7 +803,10 @@ def main() -> None:
     # ----- Avoid --------------------------------------------------------------
     with tabs[2]:
         st.subheader("Avoid / High Complexity")
-        st.caption("Sole-source, aviation-critical, hazardous, or capital > $50K.")
+        st.caption(
+            "Restricted AMSC (approved-source-only), sole-source, "
+            "aviation-critical, hazardous, custom-manufactured, or capital > $50K."
+        )
         if has_action:
             avoid = filtered[filtered["recommended_action"] == "AVOID"]
         else:

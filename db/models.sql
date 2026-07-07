@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS rfqs (
     buyer                         TEXT,
     approved_source_cages         TEXT,   -- comma-separated CAGE codes
     manufacturer_part_numbers     TEXT,   -- comma-separated MPNs
+    amsc                          TEXT,   -- Acquisition Method Suffix Code (1 letter)
     technical_documents_available INTEGER NOT NULL DEFAULT 0,  -- 0/1 bool
     url                           TEXT,
     raw_text                      TEXT,
@@ -46,13 +47,13 @@ END;
 -- opportunity_scores: scoring runs for each RFQ
 --
 -- The current scoring algorithm produces 7 weighted subscores totaling 100:
---   sourceability       (0-18)
---   competition         (0-15)
---   profit_potential    (0-15)
---   time_to_quote       (0-15)   higher = FASTER to quote
+--   sourceability       (0-25)   AMSC-driven; can a beginner source this?
+--   profit_potential    (0-20)   margin % AND absolute profit dollars
 --   technical_risk      (0-15)   higher = LESS risk
---   capital_efficiency  (0-12)
---   delivery            (0-10)   peak around 30-60 days
+--   competition         (0-12)   higher = LESS competition
+--   time_to_quote       (0-10)   higher = FASTER to quote
+--   capital_efficiency  (0-10)   sweet spot $500-$5K
+--   delivery            (0-8)    response window (days to close; peak 7-35d)
 --
 -- Plus derived estimates the dashboard surfaces (capital, margin, win prob,
 -- quote hours, profit per hour).
@@ -65,13 +66,13 @@ CREATE TABLE IF NOT EXISTS opportunity_scores (
     rfq_id                      INTEGER NOT NULL,
     score                       INTEGER NOT NULL,   -- 0..100 overall
     -- Seven-subscore framework (max points in parens)
-    sourceability               INTEGER,            -- 0..18
-    competition                 INTEGER,            -- 0..15  (higher = LESS competition)
-    profit_potential            INTEGER,            -- 0..15
-    time_to_quote               INTEGER,            -- 0..15  (higher = FASTER quote)
+    sourceability               INTEGER,            -- 0..25
+    competition                 INTEGER,            -- 0..12  (higher = LESS competition)
+    profit_potential            INTEGER,            -- 0..20
+    time_to_quote               INTEGER,            -- 0..10  (higher = FASTER quote)
     technical_risk              INTEGER,            -- 0..15  (higher = LESS risk)
-    capital_efficiency          INTEGER,            -- 0..12
-    delivery                    INTEGER,            -- 0..10  (peak 30-60 days)
+    capital_efficiency          INTEGER,            -- 0..10
+    delivery                    INTEGER,            -- 0..8   (response window; peak 7-35 days)
     -- Derived estimates
     estimated_capital_usd       INTEGER,            -- working-capital required (rough)
     estimated_margin_low        REAL,               -- gross margin %, low end

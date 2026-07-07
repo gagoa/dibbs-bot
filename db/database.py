@@ -44,6 +44,7 @@ RFQ_COLUMNS: tuple[str, ...] = (
     "buyer",
     "approved_source_cages",
     "manufacturer_part_numbers",
+    "amsc",
     "technical_documents_available",
     "url",
     "raw_text",
@@ -106,6 +107,12 @@ _OPPORTUNITY_SCORES_V2_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Columns added to the rfqs table after the initial release.
+_RFQS_MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("amsc", "TEXT"),
+)
+
+
 def _migrate_opportunity_scores(conn: sqlite3.Connection) -> None:
     """Idempotently add v2 columns to opportunity_scores.
 
@@ -120,6 +127,15 @@ def _migrate_opportunity_scores(conn: sqlite3.Connection) -> None:
             logger.info("Migrated opportunity_scores: added column %s %s", col, ctype)
 
 
+def _migrate_rfqs(conn: sqlite3.Connection) -> None:
+    """Idempotently add newer columns to rfqs (currently just amsc)."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(rfqs)")}
+    for col, ctype in _RFQS_MIGRATION_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE rfqs ADD COLUMN {col} {ctype}")
+            logger.info("Migrated rfqs: added column %s %s", col, ctype)
+
+
 def init_db(db_path: Path | None = None) -> Path:
     """Create tables (idempotent) and migrate to the latest schema.
 
@@ -130,6 +146,7 @@ def init_db(db_path: Path | None = None) -> Path:
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
     with get_connection(path) as conn:
         conn.executescript(sql)
+        _migrate_rfqs(conn)
         _migrate_opportunity_scores(conn)
     logger.info("Initialized database at %s", path)
     return path
